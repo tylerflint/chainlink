@@ -1,0 +1,150 @@
+#!/usr/bin/perl -w
+#
+# Chainlink
+#
+# A simple utility designed to add functionality to timed cron procedures.
+# Chainlink allows commands to be chained together in order of execution,
+# with a simple configuration file.
+
+use Config::IniFiles;
+use Time::localtime;
+use File::stat;
+
+my $chain = '';
+my $conf  = '/etc/chainlink.conf';
+my $verbose = 0;
+my $sendmail  = 1;
+
+# Getting parameters 
+for ($i = 0; $i < scalar(@ARGV); $i++ )
+{
+  # Chain
+  # parameter: [-c || --chain] code
+  if(($ARGV[$i] eq '-c') || ($ARGV[$i] eq '--chain')){
+      $chain = $ARGV[$i + 1];
+  }
+  # Configuration file
+  # parameter: [--config] filepath
+  if($ARGV[$i] eq '--config'){
+      $conf = $ARGV[$i + 1];
+  }
+  # Display result in terminal
+  # parameter: [-v || --verbose]
+  if(($ARGV[$i] eq '-v') || ($ARGV[$i] eq '--verbose')){
+    $verbose = 1;
+  }
+  # Sending email
+  # parameter: [-m || --mail] 0 || 1
+  if(($ARGV[$i] eq '-m') || ($ARGV[$i] eq '--mail')){
+    $sendmail = $ARGV[$i + 1];
+  }
+}
+
+# Check parameter
+if (!$chain) {
+  print "You must specify a chain to execute. \n";
+  exit;
+}
+  
+#open STDOUT, '>', "/var/log/chainlink/$chain";
+open STDOUT, '|-', "tee /var/log/chainlink/$chain";
+open STDERR, ">&STDOUT";
+
+# Check configuration file exists    
+if(! -e $conf){
+  print "Unable to locate chainlink configuration file at location: $conf \n";
+  exit;
+}
+
+# Init variables from configuration-file
+my $cfg     = Config::IniFiles->new( -file => $conf );
+my $day   = getDay();
+#my $chainlog   = $cfg->val('default', 'logfolder') . '/'.$day.'/' . $cfg->val('default', 'logfile');
+my $chainlog  = $cfg->val('default', 'logfolder') . '/' . $cfg->val('default', 'logfile');
+my $notification  = $cfg->val($chain, 'notification');
+my $title     = $cfg->val($chain, 'title');
+my $email     = $cfg->val($chain, 'email');
+my $sender    = $cfg->val($chain, 'sender');
+my $processes = $cfg->val($chain, 'processes');
+my $result    = '';
+
+# Trying to correct empty values of required variables
+if (!$notification) { $notification=$cfg->val('default','notification'); }
+if (!$title) { $title=$chain . ' results'; }
+if (!$email) { $email=$cfg->val('default','email'); }
+if (!$sender) { $sender=$cfg->val('default','sender'); }
+
+# Check section in configuration-file
+if(!$cfg->SectionExists($chain)){
+  print "Chain \"$chain\" does not exist.\n";
+  exit;
+}
+  
+# Check processes
+if(!$processes){
+  print "No processes have been defined for chain \"$chain\"\n";
+  exit;
+}
+
+if (-e $chainlog)
+{
+  @fileTime = localtime(stat($chainlog)->mtime);
+  @currTime = localtime(time());
+  # Remove file if it was not created today
+  # otherwise new records will be added into file
+  if ($fileTime[0][3].$fileTime[0][4].$fileTime[0][5] != $currTime[0][3].$currTime[0][4].$currTime[0][5])
+    {
+      unlink($chainlog);
+    }
+  }
+
+  # Open head-log of the script
+  # for saving status of processes
+  open(CHAINLOG,">>".$chainlog);
+
+
+  # CORE of the script: run processes, output to stream and log-file
+  #print CHAINLOG "\n----------------\n $title\n";
+  $result .= "\n-------------------------------------------------\n [ $title ]\n";
+  foreach (split(/,/, $processes)){
+    if (index($_,"/usr/local/sbin/chainlink.pl") == -1 ) { 
+      print CHAINLOG " [".getFormattedCurrentTime()."][$chain] $_ :STARTED\n";
+      $result .= "\n utility1:$_ \n Started at: ".getFormattedCurrentTime()."\n\n"; 
+    }
+    # Output results
+    # --------------
+    $result .= `$_`;
+    #print $result;
+    # --------------
+    if (index($_,"/usr/local/sbin/chainlink.pl") == -1 ) {
+      $result .= "\n\n Finished at: ".getFormattedCurrentTime()."\n-------------------------------------------------\n\n";
+      print CHAINLOG " [".getFormattedCurrentTime()."][$chain] $_ :FINISHED\n";
+    }
+  }
+
+  # Sending email
+  if($notification){
+    if($email){
+      open(MAIL, "|/usr/sbin/sendmail -t");
+      print MAIL "To: $email \n";
+      print MAIL "From: $sender \n";
+      print MAIL "Subject: utility1 [$title]\n\n";
+      print MAIL $result;
+      close(MAIL);
+      print CHAINLOG " [".getFormattedCurrentTime()."][$chain] Notification: SENT\n";
+    } else {
+      print CHAINLOG " [".getFormattedCurrentTime()."][$chain] Notification: NO EMAIL\n";
+    }
+  } else {
+    print CHAINLOG " [".getFormattedCurrentTime()."][$chain] Notification: DID NOT SEND\n";
+  }
+  
+  # Close log
+  #print CHAINLOG "----------------\n";
+  close(CHAINLOG);
+}
+
+if($verbose){
+  print $result;
+}
+  
